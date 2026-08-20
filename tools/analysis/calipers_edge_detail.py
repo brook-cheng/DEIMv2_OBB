@@ -134,7 +134,7 @@ ax.set_aspect('equal')
 ax.grid(True, alpha=0.3)
 
 plt.tight_layout()
-out = "/mnt/d/cx/thired/deimv2_daod/test/reports/calipers_edge_ordering.png"
+out = "./test/reports/calipers_edge_ordering.png"
 plt.savefig(out, dpi=120, bbox_inches='tight')
 plt.close()
 print(f"\nSaved: {out}")
@@ -144,7 +144,7 @@ print(f"\nQ3 supplement: show base_a,base_b for each step (from actual calipers 
 print(f"  Note main_idx SWITCHES which edge gets loaded into base.")
 
 # Quick re-run of calipers with direction annotation
-import sys; sys.path.insert(0, '/mnt/d/cx/thired/deimv2_daod')
+import sys; sys.path.insert(0, '.')
 from test.tool_calipers_demo import min_area_rect_verbose
 steps, _, _ = min_area_rect_verbose(pts)
 print(f"\n{'step':>4} {'edge_idx':>8} {'base_angle':>10} {'main_idx':>8} {'base_vec':>22} {'source desc':>30}")

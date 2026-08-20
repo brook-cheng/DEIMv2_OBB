@@ -17,7 +17,7 @@ DEIM:
 
 DINOv3STAs:
   name: dinov3_vith16plus
-  weights_path: /home/cx/cx_dir/third/deimv2_daod/ckpts/dinov3_vith16plus_pretrain_lvd1689m-7c1da9a5.pth
+  weights_path: ./ckpts/dinov3_vith16plus_pretrain_lvd1689m-7c1da9a5.pth
   interaction_indexes: [15,23,31]   # only need the [1/8, 1/16, 1/32]
   finetune: False
   conv_inplane: 160 # hidden_dim/4

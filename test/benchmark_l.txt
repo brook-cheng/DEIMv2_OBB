@@ -34,5 +34,5 @@ FLOPs: 481.629G
 --------------------------------------------------------------------------------
 ================================================================================
 Benchmark completed successfully!
-Log file saved to: /mnt/disk8t/cx_dir/projects/deimv2_daod/test/benchmark.txt
+Log file saved to: /mnt/disk8t/cx_dir/projects/deimv2_obb/test/benchmark.txt
 ================================================================================

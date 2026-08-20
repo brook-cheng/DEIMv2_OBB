@@ -50,6 +50,11 @@ PY
 
 ## 四、观察清单（按嫌疑排序）
 
+> **2026-08-20 已结案**：根因为观察清单 ②（缺 DistributedSampler），证据与修复见
+> 提交 `f08cfb7`。flight recorder 显示两卡卡在不同 iteration 的不同 collective
+> （SyncBN allgather vs 损失 allreduce，SeqNum 差 4）——不是慢卡漂移而是
+> collective 流错位死锁；触发窗口恰为 epoch10 增强策略切换点。
+
 ### ① disk 缓存双卡竞态（高嫌疑）
 `DotaDataset.precache_images` 在两 rank 各自并发执行：`np.save` 直接写同一路径
 **无锁、无原子写**；`_load_image` 读到半写文件时 `np.load` 失败→**删除该文件**→可能删掉

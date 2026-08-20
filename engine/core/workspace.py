@@ -119,11 +119,12 @@ def create(type_or_name, global_cfg=GLOBAL_CONFIG, **kwargs):
         _cfg.update(kwargs)
         name = _cfg.pop("type")  # pop extra key `type` (from cfg)
 
-        return create(name, global_cfg)
+        return create(name, global_cfg, **kwargs)
 
     module = getattr(cfg["_pymodule"], name)
     module_kwargs = {}
     module_kwargs.update(cfg)
+    module_kwargs.update(kwargs)
 
     # shared var
     for k in cfg["_share"]:
@@ -134,6 +135,8 @@ def create(type_or_name, global_cfg=GLOBAL_CONFIG, **kwargs):
 
     # inject
     for k in cfg["_inject"]:
+        if k in kwargs:
+            continue
         _k = cfg[k]
 
         if _k is None:

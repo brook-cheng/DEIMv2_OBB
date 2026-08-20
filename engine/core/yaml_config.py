@@ -211,6 +211,24 @@ class YAMLConfig(BaseConfig):
             # pop unexpected key for dataloader init
             _ = global_cfg[name].pop("total_batch_size")
         print(f"building {name} with batch_size={bs}...")
-        loader = create(name, global_cfg, batch_size=bs)
+        # No DistributedSampler → each rank shuffles the FULL dataset →
+        # collective streams desync into deadlock (20260820 evidence).
+        # torch forbids assigning .sampler after construction, so build the
+        # dataset first and hand the sampler to the DataLoader constructor.
+        from ..misc import dist_utils
+
+        extra: dict = {}
+        if dist_utils.is_dist_available_and_initialized():
+            from torch.utils.data import DistributedSampler
+
+            shuffle = self.yaml_cfg[name].get("shuffle", False)
+            dataset_key = "__distributed_dataset__"
+            global_cfg[dataset_key] = copy.deepcopy(global_cfg[name]["dataset"])
+            dataset = create(dataset_key, global_cfg)
+            extra["dataset"] = dataset
+            extra["sampler"] = DistributedSampler(
+                dataset, shuffle=shuffle, drop_last=False
+            )
+        loader = create(name, global_cfg, batch_size=bs, **extra)
         loader.shuffle = self.yaml_cfg[name].get("shuffle", False)
         return loader

@@ -223,7 +223,7 @@ def visualize_steps(pts, steps, best_step, name):
         fontsize=10,
     )
     plt.tight_layout()
-    out_path = f"/mnt/d/cx/thired/deimv2_daod/test/reports/calipers_full_{name}.png"
+    out_path = f"./test/reports/calipers_full_{name}.png"
     plt.savefig(out_path, dpi=110, bbox_inches='tight')
     plt.close()
     print(f"Saved: {out_path}")
