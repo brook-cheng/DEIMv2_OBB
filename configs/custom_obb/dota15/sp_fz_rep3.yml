@@ -1,0 +1,189 @@
+# ============================================================================
+# DOTA-v1.5 公开数据集验收: sp_fz (DINOv3 ViT-S/16plus 冻结骨干) + rep3 角度表征
+# ============================================================================
+# 模型段完全继承 sp_fz 基线 (configs/custom_obb/dlzdt/sp_fz_common.yml):
+#   - 骨干 dinov3_vits16plus, finetune=False (冻结), STA adapter → hidden 256
+#   - HybridEncoder [256,256,256] / DEIMTransformer 6层 300 query (OBB)
+#   - angle_rep=3 (解耦角度流) + obbox_rep_dim=5, 同 dlzdt/ablation/abl_rep3.yml
+# 数据: DOTA-v1.5 官方 1024/gap200 切图 (tools/dataset/dota15_split.py 产物),
+#   16 类, DotaDataset 直读官方 labelTxt 格式。
+# 评估口径: 训练内 val 为 COCO 风格监控指标; 最终指标走官方 DOTA_devkit
+#   (ResultMerge + dota-v1.5_evaluation_task1, VOC07 11点 AP @ IoU 0.5)。
+# 注意: 切图训练集含 difficult=1/2 标注, loader 不区分 difficult (官方 v1.5
+#   评估脚本同样全部按 difficult=0 处理, 口径自洽)。
+# ============================================================================
+__include__: [
+  '../../runtime.yml',
+  '../../base/dataloader.yml',
+  '../../base/optimizer.yml',
+  '../../dataset/dota_detection.yml',
+  '../dataset_common.yml',
+  '../deimv2_obb_common.yml'
+]
+
+# ---- 项目级配置 ----
+output_dir: ./outputs/dota15_sp_fz_rep3
+comet_project_name: 'deimv2_obb_dota15'
+eval_spatial_size: [640, 640]   # 模型构造时缓存 anchor 用的输入分辨率 [H, W]
+checkpoint_freq: 2              # 每 N 个 epoch 保存一次 checkpoint
+num_classes: 16                 # DOTA-v1.5 全部 16 类
+
+# ---- DEIM FlatCosine 学习率调度器 ----
+epoches: 24
+warmup_iter: 2      # 仓库惯例 ~0.1*epoches
+flat_epoch: 12      # epoches // 2
+no_aug_epoch: 2     # 最后 N 个 epoch 关闭增强
+
+#### ES-Base: EMA mAP50_95 early stopping (保持关闭, 固定 24 epoch 跑完)
+early_stopping:
+  enabled: False
+  metric: mAP50_95
+  mode: max
+  min_epochs: 12
+  patience: 8
+  min_delta: 0.0001
+  restore_best: true
+
+# ---- 训练数据: 官方 1024/200 切图 train patch ----
+# 增强相对 sp_fz 基线去掉 Mosaic: 切图 1024 → 训练 640 已有 0.625 缩放,
+# Mosaic(output_size 320) 会把 DOTA 小目标压没; 其余 OBB 增强保留。
+train_dataloader:
+  total_batch_size: 3   # FP32 实测上限: bs4 起显存峰值贴 16GB 天花板(变长 GT 碎片化),
+                        # bs3 与 bs4 总时长相同(算力受限), 但余量充足
+  num_workers: 4
+  dataset:
+    type: DotaDataset
+    cache_images: disk    # 用户确认改为 disk: 一次性建 npy 缓存(~50GB), 换取训练/评估免 PNG 解码
+    cache_ram: 0
+    # 数据路径指向 WSL 原生盘(ext4)训练工作副本: /mnt/d 跨盘(9p)随机读仅
+    # ~13MB/s, 训练卡在 1.1it/s(GPU 利用率 31%); ext4 副本由
+    # `cp -r <DOTA-V1.5>/split/{train_1024,val_1024} /home/cx/datasets/dota15/`
+    # 生成(含 npy 缓存, 共 91GB, 可随时删除重建)。
+    # 原始切图产物仍完整保留在 /mnt/d/data/datasets/public/DOTA-V1.5/split/ 下。
+    img_folder: /home/cx/datasets/dota15/train_1024/images
+    ann_folder: /home/cx/datasets/dota15/train_1024/labelTxt
+    classes_file: /mnt/d/cx/projects/deimv2_obb/configs/custom_obb/dota15/classes.txt
+    format: 'DOTA'
+    transforms:
+      ops:
+        - {type: RandomPhotometricDistort, p: 0.5}   # 随机色彩扰动
+        - {type: OBBZoomOut, fill: 0}                # 随机缩放 (zoom-out)
+        - {type: OBBIoUCrop, p: 0.8}                 # 基于 IoU 的随机裁剪
+        - {type: OBBSanitize, min_size: 1}           # 清理过小/无效标注
+        - {type: OBBFlip}                            # 随机水平+垂直翻转
+        - {type: OBBResize, size: [640, 640]}        # 1024 patch → 训练尺寸
+        - {type: OBBSanitize, min_size: 1}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: OBBConvertBoxes, normalize: True, img_size: [640, 640]}
+        - {type: Normalize, mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
+      # 4 阶段增强调度 (与 sp_fz 基线 5%/15%/25% 比例一致, 24 epoch 等比换算):
+      #   [0,1)   无 Photometric/ZoomOut/IoUCrop (仅翻转+缩放)
+      #   [1,6)   全部增强启用
+      #   [6,22)  仅翻转+缩放
+      #   [22,24) no_aug 阶段
+      policy:
+        epoch: [1, 4, 6]
+        ops: ['RandomPhotometricDistort', 'OBBZoomOut', 'OBBIoUCrop']
+  collate_fn:
+    base_size: 640
+    # Mixup / CopyBlend: 沿用 sp_fz 基线, epoch 窗口按 24 epoch 等比换算
+    mixup_prob: 0.5
+    mixup_epochs: [4, 6]
+    stop_epoch: 0             # FP32 显存约束: 关闭多尺度训练 (800² 峰值会 OOM)
+    copyblend_prob: 0.5
+    copyblend_epochs: [4, 6]
+    area_threshold: 100
+    num_objects: 3
+    with_expand: True
+    expand_ratios: [0.1, 0.25]
+    ema_restart_decay: 0.9999
+    base_size_repeat: null    # null → 不生成多尺度列表, 固定 640×640
+
+# ---- 验证数据: 官方 1024/200 切图 val patch (仅训练内监控, COCO 风格指标) ----
+val_dataloader:
+  total_batch_size: 4
+  num_workers: 4
+  dataset:
+    cache_images: disk    # 与 train 一致, 避免每轮 val 重复解码 5297 张 PNG
+    img_folder: /home/cx/datasets/dota15/val_1024/images
+    ann_folder: /home/cx/datasets/dota15/val_1024/labelTxt
+    classes_file: /mnt/d/cx/projects/deimv2_obb/configs/custom_obb/dota15/classes.txt
+    format: 'DOTA'
+    transforms:
+      ops:
+        - {type: OBBResize, size: [640, 640]}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: OBBConvertBoxes, normalize: True, img_size: [640, 640]}
+        - {type: Normalize, mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
+
+# ---- Backbone: DINOv3 ViT-S/16 + STA Adapter (照抄 sp_fz_common) ----
+# finetune=False 冻结 backbone; interaction_indexes=[] 使用全部 ViT 层
+# weights_path 覆盖 common 中过期 hash (7c1da9a5) 为实际存在的 4057cbaa
+DINOv3STAsResAtten:
+  name: dinov3_vits16plus
+  weights_path: ./ckpts/dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth
+  interaction_indexes: []
+  finetune: False
+  conv_inplane: 64
+  hidden_dim: 256
+  adapter_type: 'sta'
+
+# ---- Encoder: Hybrid Encoder (照抄 sp_fz_common) ----
+HybridEncoder:
+  in_channels: [256, 256, 256]
+  hidden_dim: 256
+  dim_feedforward: 1024
+
+# ---- Decoder: DEIMTransformer (照抄 sp_fz_common + rep3) ----
+DEIMTransformer:
+  feat_channels: [256, 256, 256]
+  hidden_dim: 256
+  dim_feedforward: 2048
+  box_mode: obb
+  angle_rep: 3            # rep3: 5D refinement + 解耦角度流 (abl_rep3.yml)
+
+PostProcessor:
+  box_mode: obb
+
+# ---- Optimizer: AdamW 三组学习率 (照抄 sp_fz_common) ----
+optimizer:
+  type: AdamW
+  params:
+    -
+      params: '^(?=.*.dinov3)(?!.*(?:norm|bn|bias)).*$'   # backbone 非 norm/bn/bias
+      lr: 0.00001
+    -
+      params: '^(?=.*.dinov3)(?=.*(?:norm|bn|bias)).*$'   # backbone norm/bn/bias
+      lr: 0.00001
+      weight_decay: 0.
+    -
+      params: '^(?=.*(?:sta|encoder|decoder))(?=.*(?:norm|bn|bias)).*$'  # adapter/encoder/decoder norm/bn/bias
+      weight_decay: 0.
+  lr: 0.0005
+  betas: [0.9, 0.999]
+  weight_decay: 0.000125
+
+# ---- Loss: DEIMCriterion (照抄 sp_fz_common + rep3 派生维度) ----
+DEIMCriterion:
+  weight_dict: {loss_mal: 1, loss_bbox: 5, loss_probiou: 5, loss_angle: 3, loss_kld: 2, loss_fgl: 0.15, loss_ddf: 1.5}
+  losses: ['mal', 'boxes', 'local']
+  use_yolo_probiou: true
+  use_yolo_angle: true
+  keep_kld: true
+  angle_lambda: 3.0
+  gamma: 1.0
+  alpha: 0.75
+  reg_max: 32
+  box_mode: obb
+  obbox_rep_dim: 5              # rep3 → 5 (rep0/2 → 6)
+
+  matcher:
+    type: HungarianMatcher
+    weight_dict: {cost_class: 2, cost_bbox: 5, cost_probiou: 5, cost_angle: 3, cost_chamfer: 2, late_cost_bbox: 0.25}
+    angle_order_alpha: 1.0
+    alpha: 0.25
+    gamma: 2.0
+    change_matcher: False
+    iou_order_alpha: 4.0
+    matcher_change_epoch: 112
+    box_mode: obb
