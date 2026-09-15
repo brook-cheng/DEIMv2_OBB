@@ -160,3 +160,8 @@ test/data
 .superpowers/
 docs/superpowers/
 docs/MAINTENANCE.md
+
+# DOTA_devkit 官方工具链本地克隆(swig 编译产物不入库; 安装见 tools/dataset/dota15_split.py)
+third_party/
+# ZCode 会话工作目录
+.zcode/

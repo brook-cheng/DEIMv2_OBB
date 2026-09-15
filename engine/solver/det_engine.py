@@ -457,6 +457,14 @@ def train_one_epoch(
             except Exception:
                 pass
 
+        # -------- 显存防碎片 --------
+        # DOTA 变长 GT 使 loss/matcher 中间张量尺寸逐迭代漂移, 缓存分配器的
+        # reserved 膨胀且空闲段无法复用(实测 allocated <1GB 而 reserved 在
+        # 60 iter 内从 5GB 涨到 16.7GB, 最终 backward 时 CUDA OOM)。
+        # 周期性把空闲段归还驱动, 封顶 reserved; 每次调用 ~几十 ms, 开销可忽略。
+        if i % 50 == 0:
+            torch.cuda.empty_cache()
+
     # ── Step cap early return: if reached, skip EMA, scheduler, and final logging ──
     if _step_cap_reached:
         train_stats = {k: meter.global_avg for k, meter in metric_logger.meters.items()}

@@ -16,10 +16,11 @@ os.environ.update(
     {
         # NCCL: WARN 即可，INFO 会为每次 collective 操作打印一行
         "NCCL_DEBUG": os.environ.get("NCCL_DEBUG", "WARN"),
-        # CUDA 显存分配：expandable_segments 避免碎片化 OOM
+        # CUDA 显存分配：expandable_segments 在 WSL+FP32+变长 GT 下 reserved 膨胀
+        # 且 empty_cache 不生效, 最终 backward OOM; 原生分配器 + max_split + GC 阈值实测稳定
         "PYTORCH_CUDA_ALLOC_CONF": os.environ.get(
             "PYTORCH_CUDA_ALLOC_CONF",
-            "expandable_segments:True,garbage_collection_threshold:0.6",
+            "max_split_size_mb:512,garbage_collection_threshold:0.6",
         ),
         "COMET_LOGGING_CONSOLE": os.environ.get("COMET_LOGGING_CONSOLE", "WARNING"),
     }
