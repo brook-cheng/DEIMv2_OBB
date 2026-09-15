@@ -866,9 +866,13 @@ class DEIMCriterion(nn.Module):
         device = targets[0]["labels"].device
 
         dn_match_indices = []
+        # 每图实际参与 DN 的 GT 数(denoising 端做过预算钳位, 见 denoising.py);
+        # 无该键时退回完整 num_gt, 兼容旧调用方。
+        dn_gt_nums = dn_meta.get("dn_gt_nums")
         for i, num_gt in enumerate(num_gts):
             if num_gt > 0:
-                gt_idx = torch.arange(num_gt, dtype=torch.int64, device=device)
+                n = dn_gt_nums[i] if dn_gt_nums is not None else num_gt
+                gt_idx = torch.arange(n, dtype=torch.int64, device=device)
                 gt_idx = gt_idx.tile(dn_num_group)
                 assert len(dn_positive_idx[i]) == len(gt_idx)
                 dn_match_indices.append((dn_positive_idx[i], gt_idx))

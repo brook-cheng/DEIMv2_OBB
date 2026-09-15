@@ -645,3 +645,90 @@ def test_cdn_generation_visualization():
             magic = f.read(4)
         assert magic == b"\x89PNG", f"{path} not a valid PNG: {magic}"
         print(f"  {path}: {size:,} bytes, valid PNG")
+
+
+def test_cdn_dn_budget_clamp_on_dense_batch():
+    """DN 查询预算钳位: max_gt > num_denoising 时 dn_total 封顶 2*num_denoising.
+
+    背景: DOTA-v1.5 切图存在单 patch 2449 实例的超密集样本, 原逻辑
+    num_group 0→1 钳位使 dn_total = 2*max_gt 无界膨胀, 注意力矩阵
+    (num_queries+dn_total)^2 瞬态十几 GB 直接 OOM。
+    """
+    torch.manual_seed(0)
+    num_classes = 16
+    num_denoising = 100
+    num_queries = 300
+    class_embed = nn.Embedding(num_classes + 1, 64, padding_idx=num_classes)
+
+    # 图0: 250 个 GT(超预算), 图1: 3 个 GT, 图2: 0 个 GT
+    dense_gt = 250
+    targets = [
+        {
+            "labels": torch.randint(0, num_classes, (dense_gt,)),
+            "boxes": torch.rand(dense_gt, 5) * 0.5,
+        },
+        {
+            "labels": torch.tensor([1, 5, 9]),
+            "boxes": torch.rand(3, 5) * 0.5,
+        },
+        {"labels": torch.zeros(0, dtype=torch.long), "boxes": torch.zeros(0, 5)},
+    ]
+
+    logits, bbox_unact, attn_mask, dn_meta = get_contrastive_denoising_training_group(
+        targets=targets,
+        num_classes=num_classes,
+        num_queries=num_queries,
+        class_embed=class_embed,
+        num_denoising=num_denoising,
+        box_mode="obb",
+    )
+
+    # dn_total 封顶 = 2 * num_group(=1) * num_denoising = 200
+    assert dn_meta["dn_num_split"][0] == 2 * num_denoising, (
+        f"dn_total 应封顶 {2 * num_denoising}, got {dn_meta['dn_num_split'][0]}"
+    )
+    tgt_size = 2 * num_denoising + num_queries
+    assert logits.shape == (3, 2 * num_denoising, 64)  # embedding_dim=64
+    assert bbox_unact.shape == (3, 2 * num_denoising, 5)
+    assert attn_mask.shape == (tgt_size, tgt_size)
+
+    # 每图 DN 正样本数 = min(num_gt, num_denoising) * num_group(=1)
+    sizes = [s.numel() for s in dn_meta["dn_positive_idx"]]
+    assert sizes == [100, 3, 0], f"per-image positives 应为 [100, 3, 0], got {sizes}"
+
+
+def test_cdn_normal_batch_unchanged_by_budget_clamp():
+    """普通批次(max_gt ≤ num_denoising)行为与钳位前完全一致."""
+    torch.manual_seed(0)
+    num_classes = 16
+    num_denoising = 100
+    num_queries = 300
+    class_embed = nn.Embedding(num_classes + 1, 64, padding_idx=num_classes)
+
+    # max_gt = 10 → num_group = 10 → dn_total = 2*10*10 = 200(与原逻辑一致)
+    targets = [
+        {
+            "labels": torch.randint(0, num_classes, (10,)),
+            "boxes": torch.rand(10, 5) * 0.5,
+        },
+        {
+            "labels": torch.randint(0, num_classes, (4,)),
+            "boxes": torch.rand(4, 5) * 0.5,
+        },
+    ]
+
+    logits, bbox_unact, attn_mask, dn_meta = get_contrastive_denoising_training_group(
+        targets=targets,
+        num_classes=num_classes,
+        num_queries=num_queries,
+        class_embed=class_embed,
+        num_denoising=num_denoising,
+        box_mode="obb",
+    )
+
+    assert dn_meta["dn_num_split"][0] == 200
+    assert dn_meta["dn_num_group"] == 10
+    assert logits.shape == (2, 200, 64)  # embedding_dim=64
+    sizes = [s.numel() for s in dn_meta["dn_positive_idx"]]
+    # 每图正样本 = min(num_gt, 100) * num_group = gt * 10
+    assert sizes == [100, 40]

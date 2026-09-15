@@ -32,6 +32,12 @@ def get_contrastive_denoising_training_group(
 
     _num_box_dof = 5 if box_mode == "obb" else 4
     # devide groups by num_denoising
+    # DN 查询预算钳位: max_gt 超过 num_denoising 预算时(如 DOTA 超密集 patch
+    # 单图 2449 实例), num_group 的 0→1 钳位会让 dn_total = 2*max_gt 随实例数
+    # 无界膨胀, 注意力矩阵 (num_queries+dn_total)^2 瞬态达十几 GB 直接 OOM。
+    # 钳位后每图只取前 num_denoising 个 GT 参与 DN, dn_total ≤ 2*num_denoising,
+    # 符合 num_denoising 的设计预算; 对 max_gt ≤ num_denoising 的普通批次零影响。
+    max_gt_num = min(max(num_gts), num_denoising)
     num_group = num_denoising // max_gt_num
     num_group = 1 if num_group == 0 else num_group
     # pad gt to max_num of a batch
@@ -44,10 +50,11 @@ def get_contrastive_denoising_training_group(
     pad_gt_mask = torch.zeros([bs, max_gt_num], dtype=torch.bool, device=device)
     # put gt info into the container
     for i in range(bs):
-        num_gt = num_gts[i]
+        # 超出 DN 预算的 GT 不参与 denoising(见上方 max_gt_num 钳位注释)
+        num_gt = min(num_gts[i], max_gt_num)
         if num_gt > 0:
-            input_query_class[i, :num_gt] = targets[i]["labels"]
-            input_query_bbox[i, :num_gt] = targets[i]["boxes"]
+            input_query_class[i, :num_gt] = targets[i]["labels"][:num_gt]
+            input_query_bbox[i, :num_gt] = targets[i]["boxes"][:num_gt]
             pad_gt_mask[i, :num_gt] = 1
     # each group has positive and negative queries.
     # (bs,2*num_group*max_gt_num)
@@ -67,8 +74,9 @@ def get_contrastive_denoising_training_group(
     # (bs,2*num_group*max_gt_num)
     positive_gt_mask = positive_gt_mask.squeeze(-1) * pad_gt_mask
     dn_positive_idx = torch.nonzero(positive_gt_mask)[:, 1]
-    # (bs, num_group*num_gt)
-    dn_positive_idx = torch.split(dn_positive_idx, [n * num_group for n in num_gts])
+    # (bs, num_group*num_gt) —— split 尺寸与钳位后的每图 DN GT 数一致
+    dn_gt_nums = [min(n, max_gt_num) for n in num_gts]
+    dn_positive_idx = torch.split(dn_positive_idx, [n * num_group for n in dn_gt_nums])
     # total denoising queries
     num_denoising = int(max_gt_num * 2 * num_group)
 
@@ -149,6 +157,8 @@ def get_contrastive_denoising_training_group(
         "dn_positive_idx": dn_positive_idx,
         "dn_num_group": num_group,
         "dn_num_split": [num_denoising, num_queries],
+        # 每图实际参与 DN 的 GT 数(经预算钳位), 供 criterion 匹配端保持一致
+        "dn_gt_nums": dn_gt_nums,
     }
 
     # print(input_query_class.shape) # torch.Size([4, 196, 256])
