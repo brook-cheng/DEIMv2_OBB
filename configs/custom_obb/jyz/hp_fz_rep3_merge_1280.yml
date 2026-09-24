@@ -8,9 +8,9 @@ __include__: [
 ]
 
 #### 项目配置
-output_dir: ./outputs/jyz_hp_fz_rep3_merge
+output_dir: ./outputs/hp_fz_rep3_merge_1280
 comet_project_name: 'deimv2_obb_sp_jyz'
-eval_spatial_size: [960, 960] #  h w
+eval_spatial_size: [1280, 1280] #  h w
 checkpoint_freq: 20    # save freq
 num_classes: 11
 
@@ -36,17 +36,17 @@ train_dataloader:
     format: 'YOLO-OBB'
     transforms:
       ops:
-        - {type: Mosaic, output_size: 480, rotation_range: 10, translation_range: [0.1, 0.1], scaling_range: [0.5, 1.5],
+        - {type: Mosaic, output_size: 640, rotation_range: 10, translation_range: [0.1, 0.1], scaling_range: [0.5, 1.5],
            probability: 1.0, fill_value: 0, use_cache: True, max_cached_images: 60, random_pop: True}
         - {type: RandomPhotometricDistort, p: 0.5}
         - {type: OBBZoomOut, fill: 0}
         - {type: OBBIoUCrop, p: 0.8}
         - {type: OBBSanitize, min_size: 1}
         - {type: OBBFlip}
-        - {type: OBBResize, size: [960, 960]}
+        - {type: OBBResize, size: [1280, 1280]}
         - {type: OBBSanitize, min_size: 1}
         - {type: ConvertPILImage, dtype: 'float32', scale: True}
-        - {type: OBBConvertBoxes, normalize: True, img_size: [960, 960]}
+        - {type: OBBConvertBoxes, normalize: True, img_size: [1280, 1280]}
         - {type: Normalize, mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
       policy:
         epoch: [20, 40, 50] # stop_epoch, 2阶段数据增强：0-无-> A(0.05~0.1)*epoch -强-> B(0.2~0.45)*epoch -弱-> C(0.3 *0.7)*epoch ->无
@@ -55,7 +55,7 @@ train_dataloader:
 
 
   collate_fn:
-    base_size: 960
+    base_size: 1280
     # Mixup options
     mixup_prob: 0.5
     mixup_epochs: [20, 40]
@@ -80,9 +80,9 @@ val_dataloader:
     format: 'YOLO-OBB'
     transforms:
       ops:
-        - {type: OBBResize, size: [960, 960]}
+        - {type: OBBResize, size: [1280, 1280]}
         - {type: ConvertPILImage, dtype: 'float32', scale: True}
-        - {type: OBBConvertBoxes, normalize: True, img_size: [960, 960]}
+        - {type: OBBConvertBoxes, normalize: True, img_size: [1280, 1280]}
         - {type: Normalize, mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
 
 
