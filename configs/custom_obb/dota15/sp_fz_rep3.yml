@@ -48,9 +48,9 @@ early_stopping:
 # 增强相对 sp_fz 基线去掉 Mosaic: 切图 1024 → 训练 640 已有 0.625 缩放,
 # Mosaic(output_size 320) 会把 DOTA 小目标压没; 其余 OBB 增强保留。
 train_dataloader:
-  total_batch_size: 3   # FP32 实测上限: bs4 起显存峰值贴 16GB 天花板(变长 GT 碎片化),
+  total_batch_size: 6   # FP32 实测上限: bs4 起显存峰值贴 16GB 天花板(变长 GT 碎片化),
                         # bs3 与 bs4 总时长相同(算力受限), 但余量充足
-  num_workers: 4
+  num_workers: 2
   dataset:
     type: DotaDataset
     cache_images: disk    # 用户确认改为 disk: 一次性建 npy 缓存(~50GB), 换取训练/评估免 PNG 解码
@@ -101,8 +101,8 @@ train_dataloader:
 
 # ---- 验证数据: 官方 1024/200 切图 val patch (仅训练内监控, COCO 风格指标) ----
 val_dataloader:
-  total_batch_size: 4
-  num_workers: 4
+  total_batch_size: 2
+  num_workers: 2
   dataset:
     cache_images: disk    # 与 train 一致, 避免每轮 val 重复解码 5297 张 PNG
     img_folder: /home/cx/datasets/dota15/val_1024/images
