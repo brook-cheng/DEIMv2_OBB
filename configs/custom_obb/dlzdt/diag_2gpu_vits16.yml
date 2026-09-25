@@ -85,7 +85,7 @@ train_dataloader:
         - {type: OBBConvertBoxes, normalize: True, img_size: [640, 640]}  # OBB 坐标归一化到 [0,1]
         - {type: Normalize, mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}  # ImageNet 标准化
       policy:
-        epoch: [5, 30, 50]   # 增强强度切换 epoch（弱→强→弱→无）
+        epoch: [10, 30, 50]   # 增强强度切换 epoch（弱→强→弱→无）
         ops: ['Mosaic', 'RandomPhotometricDistort', 'OBBZoomOut', 'OBBIoUCrop']
       mosaic_prob: 0.5         # Mosaic 启用概率（与 policy 联动）
   collate_fn:

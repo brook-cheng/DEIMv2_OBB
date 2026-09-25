@@ -1,0 +1,172 @@
+__include__: [
+  '../../runtime.yml',
+  '../../base/dataloader.yml',
+  '../../base/optimizer.yml',
+  '../../dataset/dota_detection.yml',
+  '../dataset_common.yml',
+  '../deimv2_obb_common.yml'
+]
+
+#### 项目配置
+output_dir: ./outputs/xj_hp_fz_rep3_1280
+comet_project_name: 'deimv2_obb_xj'
+eval_spatial_size: [1280, 1280] #  h w
+checkpoint_freq: 20    # save freq
+num_classes: 11
+
+## DEIM LR-Scheduler
+# FIXME： 迭代时间过长，需要调整模型结构，3h/epoch，暂时不选用
+epoches: 200 #  Total epochs: 20 for training + EMA  for 4n = 12. n=3 refers to the model size in the matched config.
+warmup_iter: 20   # 0.1 * epoches
+flat_epoch: 100    # epoch // 2 + warmup_iter
+no_aug_epoch: 20
+
+#### 设置训练数据
+## Dense O2O: Mosaic + Mixup + CopyBlend
+train_dataloader:
+  total_batch_size: 4 # total batch size equals to gpu_nums*batch_size
+  num_workers: 2
+  dataset:
+    type: DotaDataset
+    cache_images: none
+    cache_ram: 0
+    img_folder: /home/cx/cx_dir/data/datasets/线夹_数据集(2026_5_31_obb)/images/train
+    ann_folder: /home/cx/cx_dir/data/datasets/线夹_数据集(2026_5_31_obb)/labels/train
+    classes_file: /home/cx/cx_dir/data/datasets/线夹_数据集(2026_5_31_obb)/classes.txt
+    format: 'YOLO-OBB'
+    transforms:
+      ops:
+        - {type: Mosaic, output_size: 640, rotation_range: 10, translation_range: [0.1, 0.1], scaling_range: [0.5, 1.5],
+           probability: 1.0, fill_value: 0, use_cache: True, max_cached_images: 60, random_pop: True}
+        - {type: RandomPhotometricDistort, p: 0.5}
+        - {type: OBBZoomOut, fill: 0}
+        - {type: OBBIoUCrop, p: 0.8}
+        - {type: OBBSanitize, min_size: 1}
+        - {type: OBBFlip}
+        - {type: OBBResize, size: [1280, 1280]}
+        - {type: OBBSanitize, min_size: 1}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: OBBConvertBoxes, normalize: True, img_size: [1280, 1280]}
+        - {type: Normalize, mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
+      policy:
+        epoch: [20, 40, 50] # stop_epoch, 2阶段数据增强：0-无-> A(0.05~0.1)*epoch -强-> B(0.2~0.45)*epoch -弱-> C(0.3 *0.7)*epoch ->无
+        ops: ['Mosaic', 'RandomPhotometricDistort', 'OBBZoomOut', 'OBBIoUCrop']
+      mosaic_prob: 0.5
+
+
+  collate_fn:
+    base_size: 1280
+    # Mixup options
+    mixup_prob: 0.5
+    mixup_epochs: [20, 40]
+    stop_epoch: 50    # epoch in [72, ~) stop `multiscales`
+    # CopyBlend options
+    copyblend_prob: 0.5
+    copyblend_epochs: [40, 50]
+    area_threshold: 100
+    num_objects: 3
+    with_expand: True
+    expand_ratios: [0.1, 0.25]
+    ema_restart_decay: 0.9999
+    base_size_repeat: 4
+
+val_dataloader:
+  total_batch_size: 2 # total batch size equals to gpu_nums*batch_size
+  num_workers: 2
+  dataset:
+    img_folder: /home/cx/cx_dir/data/datasets/线夹_数据集(2026_5_31_obb)/images/val
+    ann_folder: /home/cx/cx_dir/data/datasets/线夹_数据集(2026_5_31_obb)/labels/val
+    classes_file: /home/cx/cx_dir/data/datasets/线夹_数据集(2026_5_31_obb)/classes.txt
+    format: 'YOLO-OBB'
+    transforms:
+      ops:
+        - {type: OBBResize, size: [1280, 1280]}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: OBBConvertBoxes, normalize: True, img_size: [1280, 1280]}
+        - {type: Normalize, mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
+
+
+#### 模型设置
+### backbone
+DINOv3STAsResAtten:
+  name: dinov3_vith16plus # 名称参考 engine/backbone/dinov3/vision_transformer.py
+  weights_path: ./ckpts/dinov3_vith16plus_pretrain_lvd1689m-7c1da9a5.pth
+  interaction_indexes: []   # all layers will be used
+  finetune: False
+  conv_inplane: 160 # dinov3_hidden_dim/4
+  hidden_dim: 640 # dinov3_hidden_dim*2/3
+  adapter_type: 'sta'  # 'sta' or 'c3k2'
+
+### encoder
+HybridEncoder:
+  in_channels: [640, 640, 640] #[hidden_dim,2*hidden_dim,4*hidden_dim]或[hidden_dim,hidden_dim,hidden_dim]
+  hidden_dim: 640
+  dim_feedforward: 2560 #4*hidden_dim
+
+### decoder
+DEIMTransformer:
+  feat_channels: [640, 640, 640] #hidden_dim
+  hidden_dim: 640 #hidden_dim
+  dim_feedforward: 5120 # hidden_dim*8
+  num_layers: 6 # 当前测试显示前3层的作用较大，为了能够全参数微调，避免OOM，这里减少层数
+  box_mode: obb
+  angle_rep: 3
+
+PostProcessor:
+  box_mode: obb
+
+### optimizer
+optimizer:
+  type: AdamW
+  params:
+    -
+      # except norm/bn/bias in self.dinov3
+      params: '^(?=.*.dinov3)(?!.*(?:norm|bn|bias)).*$'
+      lr: 0.00001 # 模型参数量越大，值应该越小。比如：sp:1e-5, l:0.5e-5, b:2.5e-6, hp:1.25e-6
+    -
+      # including norm/bn/bias in self.dinov3
+      params: '^(?=.*.dinov3)(?=.*(?:norm|bn|bias)).*$'
+      lr: 0.00001
+      weight_decay: 0.
+    -
+      # including norm/bn/bias except for the self.dinov3
+      params: '^(?=.*(?:sta|encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.
+
+  lr: 0.0005  # 模型参数量越大，值应该越小。比如：sp:5e-4, l:2.5e-4, b:1.25e-5, m:1.25e-5
+  betas: [0.9, 0.999]
+  weight_decay: 0.000125
+
+### Loss
+DEIMCriterion:
+  weight_dict: {
+    loss_mal: 2,
+    loss_bbox: 5,
+    loss_probiou: 5,
+    loss_angle: 3,
+    loss_kld: 2,
+    loss_fgl: 0.15,
+    loss_ddf: 1.5}
+  losses: ['mal', 'boxes', 'local']
+  use_yolo_probiou: true
+  use_yolo_angle: true
+  keep_kld: true
+  gamma: 1.0
+  alpha: 0.75
+  reg_max: 32
+  box_mode: obb
+  obbox_rep_dim: 5 # 派生自 angle_rep: rep0/2→6, rep1/3→5
+
+  matcher:
+    type: HungarianMatcher
+    weight_dict: {cost_class: 2, cost_bbox: 5, cost_probiou: 5, cost_angle: 3, cost_chamfer: 2, late_cost_bbox: 0.25}
+    angle_order_alpha: 1.0
+    alpha: 0.25
+    gamma: 2.0
+    # change matcher
+    change_matcher: False
+    iou_order_alpha: 4.0
+    # 0.75~0.85 * epoches
+    matcher_change_epoch: 112
+    box_mode: obb
+
