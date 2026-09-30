@@ -22,17 +22,17 @@ __include__: [
 ]
 
 # ---- 项目级配置 ----
-output_dir: ./outputs/dota15_sp_fz_rep3
+output_dir: ./outputs/dota15_sp_ft_rep3
 comet_project_name: 'deimv2_obb_dota15'
 eval_spatial_size: [1024, 1024]   # 模型构造时缓存 anchor 用的输入分辨率 [H, W]
-checkpoint_freq: 2              # 每 N 个 epoch 保存一次 checkpoint
+checkpoint_freq: 10              # 每 N 个 epoch 保存一次 checkpoint
 num_classes: 16                 # DOTA-v1.5 全部 16 类
 
 # ---- DEIM FlatCosine 学习率调度器 ----
-epoches: 60
-warmup_iter: 6      # 仓库惯例 ~0.1*epoches
-flat_epoch: 30      # epoches // 2
-no_aug_epoch: 5     # 最后 N 个 epoch 关闭增强
+epoches: 120
+warmup_iter: 12      # 仓库惯例 ~0.1*epoches
+flat_epoch: 60      # epoches // 2
+no_aug_epoch: 6     # 最后 N 个 epoch 关闭增强
 
 #### ES-Base: EMA mAP50_95 early stopping (保持关闭, 固定 24 epoch 跑完)
 early_stopping:
@@ -48,7 +48,7 @@ early_stopping:
 # 增强相对 sp_fz 基线去掉 Mosaic: 切图 1024 → 训练 640 已有 0.625 缩放,
 # Mosaic(output_size 320) 会把 DOTA 小目标压没; 其余 OBB 增强保留。
 train_dataloader:
-  total_batch_size: 4   # FP32 实测上限: bs4 起显存峰值贴 16GB 天花板(变长 GT 碎片化),
+  total_batch_size: 2   # FP32 实测上限: bs4 起显存峰值贴 16GB 天花板(变长 GT 碎片化),
                         # bs3 与 bs4 总时长相同(算力受限), 但余量充足
   num_workers: 2
   dataset:
@@ -81,16 +81,16 @@ train_dataloader:
       #   [6,22)  仅翻转+缩放
       #   [22,24) no_aug 阶段
       policy:
-        epoch: [6, 10, 15]
+        epoch: [12, 20, 30]
         ops: ['RandomPhotometricDistort', 'OBBZoomOut', 'OBBIoUCrop']
   collate_fn:
     base_size: 1024
     # Mixup / CopyBlend: 沿用 sp_fz 基线, epoch 窗口按 24 epoch 等比换算
     mixup_prob: 0.5
-    mixup_epochs: [6, 10]
+    mixup_epochs: [12, 20]
     stop_epoch: 0             # FP32 显存约束: 关闭多尺度训练 (800² 峰值会 OOM)
     copyblend_prob: 0.5
-    copyblend_epochs: [10, 15]
+    copyblend_epochs: [12, 20]
     area_threshold: 100
     num_objects: 3
     with_expand: True
@@ -122,7 +122,7 @@ DINOv3STAsResAtten:
   name: dinov3_vits16plus
   weights_path: ./ckpts/dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth
   interaction_indexes: []
-  finetune: False
+  finetune: True
   conv_inplane: 64
   hidden_dim: 256
   adapter_type: 'sta'
