@@ -107,10 +107,13 @@ class DINOv3STAs(nn.Module):
         use_sta=True,
         conv_inplane=16,
         hidden_dim=None,
+        gradient_checkpoint=False,
     ):
         super(DINOv3STAs, self).__init__()
         if "dinov3" in name:
-            self.dinov3 = DinoVisionTransformer(name=name)
+            self.dinov3 = DinoVisionTransformer(
+                name=name, gradient_checkpointing=gradient_checkpoint
+            )
             if weights_path is not None and os.path.exists(weights_path):
                 print(f"Loading ckpt from {weights_path}...")
                 weights = torch.load(weights_path, weights_only=True, map_location="cpu")

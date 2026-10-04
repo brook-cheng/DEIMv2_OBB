@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
 
 import torch
 import torch.nn.init
+import torch.utils.checkpoint as cp
 from torch import Tensor, nn
 
 from .layers import (
@@ -205,6 +206,7 @@ class DinoVisionTransformer(nn.Module):
     def __init__(
         self,
         name,
+        gradient_checkpointing=False,
     ):
         super().__init__()
 
@@ -251,6 +253,7 @@ class DinoVisionTransformer(nn.Module):
         self.n_blocks = depth
         self.num_heads = num_heads
         self.patch_size = patch_size
+        self.gradient_checkpointing = gradient_checkpointing
 
         self.patch_embed = PatchEmbed(
             img_size=img_size,
@@ -449,7 +452,13 @@ class DinoVisionTransformer(nn.Module):
                 rope_sincos = self.rope_embed(H=H, W=W)
             else:
                 rope_sincos = None
-            x = blk(x, rope_sincos)
+            if self.gradient_checkpointing and self.training:
+                # 激活重计算: 反向时重算 block 前向, 省激活显存换 ~30% 计算;
+                # use_reentrant=False 兼容 rope 的 None/tuple 输入与冻结参数
+                # (finetune=False 时输入无 requires_grad, reentrant 版会报错)。
+                x = cp.checkpoint(blk, x, rope_sincos, use_reentrant=False)
+            else:
+                x = blk(x, rope_sincos)
             if i in blocks_to_take:
                 output.append(x)
         assert len(output) == len(

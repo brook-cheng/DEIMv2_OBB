@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
+import torch.utils.checkpoint
 from typing import List
 
 from ..core import register
@@ -176,8 +177,10 @@ class TransformerDecoder(nn.Module):
         act="relu",
         box_mode="hbb",
         angle_rep=0,
+        gradient_checkpoint=False,
     ):
         super(TransformerDecoder, self).__init__()
+        self.gradient_checkpoint = gradient_checkpoint
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.layer_scale = layer_scale
@@ -325,14 +328,28 @@ class TransformerDecoder(nn.Module):
                         )
                         dec_angle_output_detach = dec_angle_output.detach()
 
-            output = layer(
-                output,
-                ref_points_input,
-                value,
-                spatial_shapes,
-                attn_mask,
-                query_pos_embed,
-            )
+            if self.gradient_checkpoint and self.training:
+                # 激活重计算: 反向重算层内注意力中间量(层输出本身是 aux 边界
+                # 必须保留); use_reentrant=False 兼容 value 列表等非叶张量输入
+                output = torch.utils.checkpoint.checkpoint(
+                    layer,
+                    output,
+                    ref_points_input,
+                    value,
+                    spatial_shapes,
+                    attn_mask,
+                    query_pos_embed,
+                    use_reentrant=False,
+                )
+            else:
+                output = layer(
+                    output,
+                    ref_points_input,
+                    value,
+                    spatial_shapes,
+                    attn_mask,
+                    query_pos_embed,
+                )
 
             if layer_idx == 0:
                 pre_bboxes = F.sigmoid(
@@ -350,14 +367,26 @@ class TransformerDecoder(nn.Module):
                 if self.angle_rep == 3:
                     # ref_dec_angle_input 首次为(x,y,w,h,offset_w,offset_h)，后续为(x,y,w,h,r)
                     ref_dec_angle_input = ref_dec_angle_detach.unsqueeze(2)
-                    dec_angle_output = self.decouple_angle_layers[layer_idx](
-                        dec_angle_output,
-                        ref_dec_angle_input,
-                        value,
-                        spatial_shapes,
-                        attn_mask,
-                        query_dec_angle_embed,
-                    )
+                    if self.gradient_checkpoint and self.training:
+                        dec_angle_output = torch.utils.checkpoint.checkpoint(
+                            self.decouple_angle_layers[layer_idx],
+                            dec_angle_output,
+                            ref_dec_angle_input,
+                            value,
+                            spatial_shapes,
+                            attn_mask,
+                            query_dec_angle_embed,
+                            use_reentrant=False,
+                        )
+                    else:
+                        dec_angle_output = self.decouple_angle_layers[layer_idx](
+                            dec_angle_output,
+                            ref_dec_angle_input,
+                            value,
+                            spatial_shapes,
+                            attn_mask,
+                            query_dec_angle_embed,
+                        )
                     if layer_idx == 0:
                         dec_angle_initial = torch.sigmoid(
                             pre_angle_head(dec_angle_output)
@@ -474,6 +503,7 @@ class DEIMTransformer(nn.Module):
         share_score_head=False,
         box_mode="hbb",
         angle_rep=0,
+        gradient_checkpoint=False,
     ):
         super().__init__()
         assert len(feat_channels) <= num_levels
@@ -568,6 +598,7 @@ class DEIMTransformer(nn.Module):
             act=activation,
             box_mode=self.box_mode,
             angle_rep=self.angle_rep,
+            gradient_checkpoint=gradient_checkpoint,
         )
         # denoising
         self.num_denoising = num_denoising
