@@ -77,6 +77,27 @@ def validate_max_optimizer_steps(value) -> int | None:
     return value
 
 
+def validate_gradient_accumulation_steps(value) -> int:
+    """Return validated positive int (1 = no accumulation).
+
+    Accepts None (→ 1) or positive int. Rejects 0, negatives, bool, float,
+    str, etc. — same strictness as :func:`validate_max_optimizer_steps`.
+    """
+    if value is None:
+        return 1
+
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(
+            "gradient_accumulation_steps must be None or int, got "
+            f"{type(value).__name__}: {value!r}"
+        )
+    if value < 1:
+        raise ValueError(
+            f"gradient_accumulation_steps must be >= 1 or None, got {value}"
+        )
+    return value
+
+
 def raise_for_nonfinite_losses(
     loss_dict: dict[str, torch.Tensor],
     *,

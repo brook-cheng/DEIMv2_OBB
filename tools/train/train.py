@@ -102,6 +102,9 @@ def print_training_config(cfg: YAMLConfig) -> None:
     val_bs = cfg.yaml_cfg.get("val_dataloader", {}).get("total_batch_size", "N/A")
     print(f"  Train: {train_bs}")
     print(f"  Val: {val_bs}")
+    accum = getattr(cfg, "gradient_accumulation_steps", 1) or 1
+    if isinstance(train_bs, int) and accum > 1:
+        print(f"  Effective train (x accum {accum}): {train_bs * accum}")
 
     print(f"\nModel:")
     if "DINOv3STAs" in cfg.yaml_cfg:

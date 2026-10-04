@@ -6,6 +6,8 @@ Modified from DETR (https://github.com/facebookresearch/detr/blob/main/engine.py
 Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 """
 
+import contextlib
+import os
 from typing import Iterable
 from pathlib import Path
 
@@ -24,6 +26,7 @@ from ..eval.obb_eval import obb_evaluate
 from .training_diagnostics import (
     NanGradientTracker,
     validate_max_optimizer_steps,
+    validate_gradient_accumulation_steps,
     raise_for_nonfinite_losses,
     raise_for_nonfinite_total,
     inspect_gradients,
@@ -201,6 +204,20 @@ def train_one_epoch(
     nan_output_dir = kwargs.get("output_dir", None)
     validate_max_optimizer_steps(max_optimizer_steps)
 
+    # ── 梯度累积 ──────────────────────────────────────────────────────────
+    # 每 accum_steps 个数据迭代做一次 optimizer.step; 等效 batch =
+    # total_batch_size × accum_steps。accum_steps=1 时与原逐迭代行为一致。
+    accum_steps = validate_gradient_accumulation_steps(
+        kwargs.get("gradient_accumulation_steps", 1)
+    )
+    # DDP no_sync: 非末位 micro 不触发梯度 all-reduce, K 次通信合并为 1 次。
+    # find_unused_parameters=True 与 no_sync 在个别拓扑下可能冲突,
+    # DEIM_GRAD_ACCUM_NO_SYNC=0 可降级为每 micro 全量同步(结果不变, 变慢)。
+    _no_sync_enabled = (
+        accum_steps > 1
+        and os.environ.get("DEIM_GRAD_ACCUM_NO_SYNC", "1") != "0"
+    )
+
     nan_tracker = NanGradientTracker(max_events=int(nan_max_events))
 
     # Per-rank iteration timestamps for multi-GPU hang diagnosis; no-op
@@ -227,6 +244,11 @@ def train_one_epoch(
             metric_logger.log_every(data_loader, print_freq, header)
         )
 
+    micro_buffer: list = []       # 待累积的 (samples, targets, i, metas)
+    weighted_losses: dict = {}    # 跨 micro 的 α 加权损失(detach), 每 optimizer step 汇报一次
+    grad_norm_before = grad_norm_after = 0.0
+    n_total_iters = len(data_loader)
+
     for i, (samples, targets) in data_loader_iter:
         _heartbeat.beat(
             epoch=epoch,
@@ -248,55 +270,106 @@ def train_one_epoch(
             _step_cap_reached = True
             break
 
-        if use_amp:
-            with torch.autocast(
-                device_type=str(device), dtype=torch.bfloat16, cache_enabled=True
-            ):
-                outputs = model(samples, targets=targets)
+        micro_buffer.append((samples, targets, i, metas))
+        # 凑满 accum_steps 个 micro、或数据迭代耗尽(尾组按实际数量处理)时结算
+        is_group_end = len(micro_buffer) == accum_steps or (i + 1) == n_total_iters
 
-            # BF16 前向输出递归转为 FP32，确保 criterion 全程以 FP32 计算
-            outputs = tree_map(
-                lambda t: t.float()
-                if isinstance(t, torch.Tensor) and t.is_floating_point()
-                else t,
-                outputs,
-            )
+        if is_group_end:
+            # ── GT 占比精确加权 ──────────────────────────────────────────────
+            # criterion 每次调用内部把损失除以 clamp(全局GT数/world, 1)(自带
+            # all_reduce), 因此"整 batch 一次 backward"的梯度 = Σ_k S_k/c_ref。
+            # 外部乘 α_k = c_k/c_ref 即精确复现该梯度; 朴素 1/K 在 GT 数倾斜
+            # (DOTA 单 patch 3~2449)时会把稀疏 micro 的梯度高估上百倍。
+            gt_counts = [sum(len(t["labels"]) for t in tg) for _, tg, _, _ in micro_buffer]
+            counts_t = torch.as_tensor(gt_counts, dtype=torch.float, device=device)
+            if dist_utils.is_dist_available_and_initialized():
+                torch.distributed.all_reduce(counts_t)
+            world = dist_utils.get_world_size()
+            c_k = torch.clamp(counts_t / world, min=1.0)
+            c_ref = torch.clamp(counts_t.sum() / world, min=1.0)
+            alphas = (c_k / c_ref).tolist()
 
-            if (
-                torch.isnan(outputs["pred_boxes"]).any()
-                or torch.isinf(outputs["pred_boxes"]).any()
-            ):
-                print(outputs["pred_boxes"])
-                state = model.state_dict()
-                new_state = {}
-                for key, value in model.state_dict().items():
-                    # Replace 'module' with 'model' in each key
-                    new_key = key.replace("module.", "")
-                    # Add the updated key-value pair to the state dictionary
-                    state[new_key] = value
-                new_state["model"] = state
-                dist_utils.save_on_master(new_state, "./NaN.pth")
+            # 组开始: 清零残留梯度(原逐迭代 zero_grad 语义移到组边界)
+            optimizer.zero_grad()
+            if kendall_optimizer is not None:
+                kendall_optimizer.zero_grad()
 
-            with torch.autocast(device_type=str(device), enabled=False):
-                loss_dict = criterion(outputs, targets, **metas)
+            for k_idx, (samples_k, targets_k, i_k, metas_k) in enumerate(micro_buffer):
+                is_last_micro = k_idx == len(micro_buffer) - 1
+                alpha_k = alphas[k_idx]
+                no_sync_ctx = (
+                    model.no_sync()
+                    if (_no_sync_enabled and not is_last_micro and hasattr(model, "no_sync"))
+                    else contextlib.nullcontext()
+                )
+                with no_sync_ctx:
+                    if use_amp:
+                        with torch.autocast(
+                            device_type=str(device), dtype=torch.bfloat16, cache_enabled=True
+                        ):
+                            outputs = model(samples_k, targets=targets_k)
 
-            raise_for_nonfinite_losses(loss_dict, epoch=epoch, step=i, global_step=global_step)
+                        # BF16 前向输出递归转为 FP32，确保 criterion 全程以 FP32 计算
+                        outputs = tree_map(
+                            lambda t: t.float()
+                            if isinstance(t, torch.Tensor) and t.is_floating_point()
+                            else t,
+                            outputs,
+                        )
 
-            loss = sum(loss_dict.values())
-            raise_for_nonfinite_total(loss, epoch=epoch, step=i, global_step=global_step)
-            loss.backward()
+                        if (
+                            torch.isnan(outputs["pred_boxes"]).any()
+                            or torch.isinf(outputs["pred_boxes"]).any()
+                        ):
+                            print(outputs["pred_boxes"])
+                            state = model.state_dict()
+                            new_state = {}
+                            for key, value in model.state_dict().items():
+                                # Replace 'module' with 'model' in each key
+                                new_key = key.replace("module.", "")
+                                # Add the updated key-value pair to the state dictionary
+                                state[new_key] = value
+                            new_state["model"] = state
+                            dist_utils.save_on_master(new_state, "./NaN.pth")
 
-            _, zeroed = inspect_gradients(
-                model.named_parameters(),
-                fail_on_zero_grad=fail_on_zero_grad,
-                epoch=epoch,
-                step=i,
-                global_step=global_step,
-                nan_zero_patterns=_NAN_ZERO_PATTERNS,
-                nan_tracker=nan_tracker,
-            )
-            _save_nan_snapshot(nan_tracker, model, optimizer, loss_dict, epoch, i, nan_output_dir)
+                        with torch.autocast(device_type=str(device), enabled=False):
+                            loss_dict = criterion(outputs, targets_k, **metas_k)
+                    else:
+                        outputs = model(samples_k, targets=targets_k)
+                        loss_dict = criterion(outputs, targets_k, **metas_k)
 
+                    raise_for_nonfinite_losses(
+                        loss_dict, epoch=epoch, step=i_k, global_step=metas_k["global_step"]
+                    )
+
+                    if kendall is not None:
+                        loss = kendall.weighted_loss(loss_dict)
+                    else:
+                        loss: torch.Tensor = sum(loss_dict.values())
+                    raise_for_nonfinite_total(
+                        loss, epoch=epoch, step=i_k, global_step=metas_k["global_step"]
+                    )
+                    (alpha_k * loss).backward()
+
+                _, zeroed = inspect_gradients(
+                    model.named_parameters(),
+                    fail_on_zero_grad=fail_on_zero_grad,
+                    epoch=epoch,
+                    step=i_k,
+                    global_step=metas_k["global_step"],
+                    nan_zero_patterns=_NAN_ZERO_PATTERNS,
+                    nan_tracker=nan_tracker,
+                )
+                _save_nan_snapshot(nan_tracker, model, optimizer, loss_dict, epoch, i_k, nan_output_dir)
+
+                # α 加权损失按 key 累加(micro 间键集可不同, 缺失即贡献 0);
+                # detach 断图, 防止跨 micro 持有整段反向图。
+                for key, v in loss_dict.items():
+                    if not isinstance(v, torch.Tensor):
+                        v = torch.as_tensor(float(v), device=device)
+                    weighted_losses[key] = weighted_losses.get(key, 0) + v.detach() * alpha_k
+
+            # ── 边界动作: 每 optimizer step 一次 ──
             if max_norm > 0:
                 grad_norm_before = torch.nn.utils.clip_grad_norm_(
                     model.parameters(), max_norm
@@ -309,153 +382,85 @@ def train_one_epoch(
                 grad_norm_after = grad_norm_before
 
             optimizer.step()
-            optimizer.zero_grad()
+            if kendall_optimizer is not None:
+                kendall_optimizer.step()
             _optimizer_step_count += 1
 
             if ema is not None:
                 ema.update(model)
 
-        else:
-            outputs = model(samples, targets=targets)
-            loss_dict = criterion(outputs, targets, **metas)
-            raise_for_nonfinite_losses(loss_dict, epoch=epoch, step=i, global_step=global_step)
+            if kendall is not None and dist_utils.is_main_process() and global_step % 50 == 0:
+                weights = kendall.get_weights()
+                if comet_exp:
+                    try:
+                        for k, w in weights.items():
+                            comet_exp.log_metric(
+                                f"kendall/{k}", w, step=global_step
+                            )
+                    except Exception:
+                        pass
 
-            optimizer.zero_grad()
-            if kendall_optimizer is not None:
-                kendall_optimizer.zero_grad()
+            # ── 日志: 每 optimizer step 一次 ──
+            loss_dict_reduced = dist_utils.reduce_dict(weighted_losses)
+            loss_value = sum(loss_dict_reduced.values())
 
-            if kendall is not None:
-                loss = kendall.weighted_loss(loss_dict)
-                raise_for_nonfinite_total(loss, epoch=epoch, step=i, global_step=global_step)
-                loss.backward()
+            metric_logger.update(loss=loss_value, **loss_dict_reduced)
+            metric_logger.update(lr=optimizer.param_groups[0]["lr"])
 
-                _, zeroed = inspect_gradients(
-                    model.named_parameters(),
-                    fail_on_zero_grad=fail_on_zero_grad,
-                    epoch=epoch,
-                    step=i,
-                    global_step=global_step,
-                    nan_zero_patterns=_NAN_ZERO_PATTERNS,
-                    nan_tracker=nan_tracker,
-                )
-                _save_nan_snapshot(nan_tracker, model, optimizer, loss_dict, epoch, i, nan_output_dir)
+            # -------- tqdm 进度条：显示主损失 --------
+            if use_tqdm:
+                postfix_dict = {
+                    "lr": f'{optimizer.param_groups[0]["lr"]:.8f}',
+                    "total": f"{loss_value:.4f}",
+                }
+                for k, v in loss_dict_reduced.items():
+                    family, source, _ = parse_loss_key(k)
+                    if source == "main":
+                        short_name = k.replace("loss_", "")
+                        postfix_dict[short_name] = f"{v:.4f}"
+                data_loader_iter.set_postfix(postfix_dict)
 
-                if max_norm > 0:
-                    grad_norm_before = torch.nn.utils.clip_grad_norm_(
-                        model.parameters(), max_norm
+            # -------- Comet batch 日志 --------
+            if comet_exp and dist_utils.is_main_process() and global_step % 50 == 0:
+                try:
+                    for k, v in loss_dict_reduced.items():
+                        family, source, idx = parse_loss_key(k)
+                        metric_name = f"{source}/{family}"
+                        if idx is not None:
+                            if source in ("aux", "enc"):
+                                metric_name += f"/layer_{idx}"
+                            elif source in ("dn", "dn_pre"):
+                                metric_name += f"/group_{idx}"
+                        comet_exp.log_metric(metric_name, v.item(), step=global_step)
+
+                    comet_exp.log_metric(
+                        "main/loss_total", loss_value.item(), step=global_step
                     )
-                    grad_norm_after = min(grad_norm_before, max_norm)
-                else:
-                    grad_norm_before = torch.nn.utils.clip_grad_norm_(
-                        model.parameters(), float("inf")
+                    comet_exp.log_metric(
+                        "lr", optimizer.param_groups[0]["lr"], step=global_step
                     )
-                    grad_norm_after = grad_norm_before
-
-                optimizer.step()
-                if kendall_optimizer is not None:
-                    kendall_optimizer.step()
-                _optimizer_step_count += 1
-
-                if dist_utils.is_main_process() and global_step % 50 == 0:
-                    weights = kendall.get_weights()
-                    if comet_exp:
-                        try:
-                            for k, w in weights.items():
-                                comet_exp.log_metric(
-                                    f"kendall/{k}", w, step=global_step
-                                )
-                        except Exception:
-                            pass
-            else:
-                loss: torch.Tensor = sum(loss_dict.values())
-                raise_for_nonfinite_total(loss, epoch=epoch, step=i, global_step=global_step)
-                loss.backward()
-
-                _, zeroed = inspect_gradients(
-                    model.named_parameters(),
-                    fail_on_zero_grad=fail_on_zero_grad,
-                    epoch=epoch,
-                    step=i,
-                    global_step=global_step,
-                    nan_zero_patterns=_NAN_ZERO_PATTERNS,
-                    nan_tracker=nan_tracker,
-                )
-                _save_nan_snapshot(nan_tracker, model, optimizer, loss_dict, epoch, i, nan_output_dir)
-
-                if max_norm > 0:
-                    grad_norm_before = torch.nn.utils.clip_grad_norm_(
-                        model.parameters(), max_norm
+                    comet_exp.log_metric(
+                        "grad/norm/before_clip", grad_norm_before, step=global_step
                     )
-                    grad_norm_after = min(grad_norm_before, max_norm)
-                else:
-                    grad_norm_before = torch.nn.utils.clip_grad_norm_(
-                        model.parameters(), float("inf")
+                    comet_exp.log_metric(
+                        "grad/norm/after_clip", grad_norm_after, step=global_step
                     )
-                    grad_norm_after = grad_norm_before
+                    comet_exp.log_metric(
+                        "param/norm",
+                        compute_param_norm(model),
+                        step=global_step,
+                    )
+                except Exception:
+                    pass
 
-                optimizer.step()
-                _optimizer_step_count += 1
-
-            if ema is not None:
-                ema.update(model)
+            micro_buffer = []
+            weighted_losses = {}
 
         if self_lr_scheduler:
             optimizer = lr_scheduler.step(cur_iters + i, optimizer)
         else:
             if lr_warmup_scheduler is not None:
                 lr_warmup_scheduler.step()
-
-        loss_dict_reduced = dist_utils.reduce_dict(loss_dict)
-        loss_value = sum(loss_dict_reduced.values())
-
-        metric_logger.update(loss=loss_value, **loss_dict_reduced)
-        metric_logger.update(lr=optimizer.param_groups[0]["lr"])
-
-        # -------- tqdm 进度条：显示主损失 --------
-        if use_tqdm:
-            postfix_dict = {
-                "lr": f'{optimizer.param_groups[0]["lr"]:.8f}',
-                "total": f"{loss_value:.4f}",
-            }
-            for k, v in loss_dict_reduced.items():
-                family, source, _ = parse_loss_key(k)
-                if source == "main":
-                    short_name = k.replace("loss_", "")
-                    postfix_dict[short_name] = f"{v:.4f}"
-            data_loader_iter.set_postfix(postfix_dict)
-
-        # -------- Comet batch 日志 --------
-        if comet_exp and dist_utils.is_main_process() and global_step % 50 == 0:
-            try:
-                for k, v in loss_dict_reduced.items():
-                    family, source, idx = parse_loss_key(k)
-                    metric_name = f"{source}/{family}"
-                    if idx is not None:
-                        if source in ("aux", "enc"):
-                            metric_name += f"/layer_{idx}"
-                        elif source in ("dn", "dn_pre"):
-                            metric_name += f"/group_{idx}"
-                    comet_exp.log_metric(metric_name, v.item(), step=global_step)
-
-                comet_exp.log_metric(
-                    "main/loss_total", loss_value.item(), step=global_step
-                )
-                comet_exp.log_metric(
-                    "lr", optimizer.param_groups[0]["lr"], step=global_step
-                )
-                comet_exp.log_metric(
-                    "grad/norm/before_clip", grad_norm_before, step=global_step
-                )
-                comet_exp.log_metric(
-                    "grad/norm/after_clip", grad_norm_after, step=global_step
-                )
-                comet_exp.log_metric(
-                    "param/norm",
-                    compute_param_norm(model),
-                    step=global_step,
-                )
-            except Exception:
-                pass
 
         # -------- 显存防碎片 --------
         # DOTA 变长 GT 使 loss/matcher 中间张量尺寸逐迭代漂移, 缓存分配器的

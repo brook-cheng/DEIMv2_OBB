@@ -286,6 +286,9 @@ class DetSolver(BaseSolver):
                 fail_on_zero_grad=_fail_on_zero_grad,
                 output_dir=self.output_dir,
                 nan_max_events=args.yaml_cfg.get("nan_max_events", 10),
+                gradient_accumulation_steps=getattr(
+                    args, "gradient_accumulation_steps", 1
+                ),
             )
 
             if train_stats.pop("_step_cap_reached", False):

@@ -72,6 +72,11 @@ class BaseConfig(object):
         self.clip_max_norm : float = 0.
         self.find_unused_parameters :bool = None
 
+        # 梯度累积: 每 N 个数据迭代做一次 optimizer.step。
+        # 等效 batch = total_batch_size × gradient_accumulation_steps;
+        # 1(默认) = 现行为。LR 不自动缩放, 需按等效 batch 自行调整。
+        self.gradient_accumulation_steps :int = 1
+
         self.seed :int = None
         self.print_freq :int = None
         self.checkpoint_freq :int = 1
