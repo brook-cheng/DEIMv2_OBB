@@ -9,7 +9,7 @@ __include__: [
 
 #### 项目配置
 output_dir: ./outputs/dlzdt_l_fz_rep3_960
-comet_project_name: 'deimv2_obb_sp_dlzdt'
+comet_project_name: 'deimv2_obb_dlzdt'
 eval_spatial_size: [960, 960] #  h w
 checkpoint_freq: 20    # save freq
 num_classes: 1

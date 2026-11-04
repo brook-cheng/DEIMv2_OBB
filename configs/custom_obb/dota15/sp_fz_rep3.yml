@@ -59,9 +59,9 @@ train_dataloader:
     # / 写 ~447MB/s, 无需旧机的 ext4 工作副本——旧机 9p 随机读仅 ~13MB/s)。
     # 副本不含 npy 缓存: train 侧首轮 epoch 自动构建(~47GB 落盘同目录),
     # val 侧需先跑 tools/dataset/dota15_precache.py 补齐。
-    img_folder: /mnt/d/project_data/public/DOTA-V1.5/split/train_1024/images
-    ann_folder: /mnt/d/project_data/public/DOTA-V1.5/split/train_1024/labelTxt
-    classes_file: /mnt/d/cx/thired/deimv2_daod/configs/custom_obb/dota15/classes.txt
+    img_folder: /mnt/disk8t/cx_dir/data/datasets/DOTA-V1.5/split/train_1024/images
+    ann_folder: /mnt/disk8t/cx_dir/data/datasets/DOTA-V1.5/split/train_1024/labelTxt
+    classes_file: /home/cx/cx_dir/projects/deimv2_daod/configs/custom_obb/dota15/classes.txt
     format: 'DOTA'
     transforms:
       ops:
@@ -104,9 +104,9 @@ val_dataloader:
   num_workers: 2
   dataset:
     cache_images: disk    # 与 train 一致, 避免每轮 val 重复解码 5297 张 PNG
-    img_folder: /mnt/d/project_data/public/DOTA-V1.5/split/val_1024/images
-    ann_folder: /mnt/d/project_data/public/DOTA-V1.5/split/val_1024/labelTxt
-    classes_file: /mnt/d/cx/thired/deimv2_daod/configs/custom_obb/dota15/classes.txt
+    img_folder: /mnt/disk8t/cx_dir/data/datasets/DOTA-V1.5/split/val_1024/images
+    ann_folder: /mnt/disk8t/cx_dir/data/datasets/DOTA-V1.5/split/val_1024/labelTxt
+    classes_file: /home/cx/cx_dir/projects/deimv2_daod/configs/custom_obb/dota15/classes.txt
     format: 'DOTA'
     transforms:
       ops:

@@ -29,10 +29,10 @@ checkpoint_freq: 10              # 每 N 个 epoch 保存一次 checkpoint
 num_classes: 16                 # DOTA-v1.5 全部 16 类
 
 # ---- DEIM FlatCosine 学习率调度器 ----
-epoches: 120
-warmup_iter: 12      # 仓库惯例 ~0.1*epoches
-flat_epoch: 60      # epoches // 2
-no_aug_epoch: 6     # 最后 N 个 epoch 关闭增强
+epoches: 200
+warmup_iter: 20      # 仓库惯例 ~0.1*epoches
+flat_epoch: 100      # epoches // 2
+no_aug_epoch: 10     # 最后 N 个 epoch 关闭增强
 
 #### ES-Base: EMA mAP50_95 early stopping (保持关闭, 固定 24 epoch 跑完)
 early_stopping:
@@ -59,9 +59,9 @@ train_dataloader:
     # / 写 ~447MB/s, 无需旧机的 ext4 工作副本——旧机 9p 随机读仅 ~13MB/s)。
     # 副本不含 npy 缓存: train 侧首轮 epoch 自动构建(~47GB 落盘同目录),
     # val 侧需先跑 tools/dataset/dota15_precache.py 补齐。
-    img_folder: /mnt/d/project_data/public/DOTA-V1.5/split/train_1024/images
-    ann_folder: /mnt/d/project_data/public/DOTA-V1.5/split/train_1024/labelTxt
-    classes_file: /mnt/d/cx/thired/deimv2_daod/configs/custom_obb/dota15/classes.txt
+    img_folder: /mnt/disk8t/cx_dir/data/datasets/DOTA-V1.5/split/train_1024/images
+    ann_folder: /mnt/disk8t/cx_dir/data/datasets/DOTA-V1.5/split/train_1024/labelTxt
+    classes_file: /home/cx/cx_dir/projects/deimv2_daod/configs/custom_obb/dota15/classes.txt
     format: 'DOTA'
     transforms:
       ops:
@@ -81,16 +81,16 @@ train_dataloader:
       #   [6,22)  仅翻转+缩放
       #   [22,24) no_aug 阶段
       policy:
-        epoch: [12, 20, 30]
+        epoch: [20, 40, 50]
         ops: ['RandomPhotometricDistort', 'OBBZoomOut', 'OBBIoUCrop']
   collate_fn:
     base_size: 1024
     # Mixup / CopyBlend: 沿用 sp_fz 基线, epoch 窗口按 24 epoch 等比换算
     mixup_prob: 0.5
-    mixup_epochs: [12, 20]
-    stop_epoch: 0             # FP32 显存约束: 关闭多尺度训练 (800² 峰值会 OOM)
+    mixup_epochs: [20, 40]
+    stop_epoch: 50             # FP32 显存约束: 关闭多尺度训练 (800² 峰值会 OOM)
     copyblend_prob: 0.5
-    copyblend_epochs: [12, 20]
+    copyblend_epochs: [40, 50]
     area_threshold: 100
     num_objects: 3
     with_expand: True
@@ -104,9 +104,9 @@ val_dataloader:
   num_workers: 2
   dataset:
     cache_images: disk    # 与 train 一致, 避免每轮 val 重复解码 5297 张 PNG
-    img_folder: /mnt/d/project_data/public/DOTA-V1.5/split/val_1024/images
-    ann_folder: /mnt/d/project_data/public/DOTA-V1.5/split/val_1024/labelTxt
-    classes_file: /mnt/d/cx/thired/deimv2_daod/configs/custom_obb/dota15/classes.txt
+    img_folder: /mnt/disk8t/cx_dir/data/datasets/DOTA-V1.5/split/val_1024/images
+    ann_folder: /mnt/disk8t/cx_dir/data/datasets/DOTA-V1.5/split/val_1024/labelTxt
+    classes_file: /home/cx/cx_dir/projects/deimv2_daod/configs/custom_obb/dota15/classes.txt
     format: 'DOTA'
     transforms:
       ops:
