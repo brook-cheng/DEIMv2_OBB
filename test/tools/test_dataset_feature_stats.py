@@ -29,9 +29,27 @@ from tools.dataset_feature_stats import (  # noqa: E402
     parse_dota_line,
     parse_yolo_obb_line,
     parse_args,
+    percentile_stats,
     run,
     write_plots,
 )
+
+
+def test_percentile_stats_multisample():
+    """多样本分位数映射回归: median 与 p25 曾互换(单样本测试测不出)。"""
+    vals = list(range(1, 101))  # 1..100
+    s = percentile_stats(vals)
+    assert s["count"] == 100
+    assert s["mean"] == pytest.approx(50.5)
+    assert s["median"] == pytest.approx(50.5)
+    assert s["p5"] == pytest.approx(5.95)
+    assert s["p25"] == pytest.approx(25.75)
+    assert s["p75"] == pytest.approx(75.25)
+    assert s["p95"] == pytest.approx(95.05)
+    assert s["min"] == 1 and s["max"] == 100
+    assert s["p25"] < s["median"] < s["p75"]
+    empty = percentile_stats([])
+    assert empty["count"] == 0 and empty["median"] is None
 
 # --------------------------------------------------------------------------- #
 # 几何口径

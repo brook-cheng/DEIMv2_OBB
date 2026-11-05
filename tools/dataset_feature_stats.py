@@ -275,12 +275,13 @@ def percentile_stats(values: list[float]) -> dict:
         return {"count": 0, **{k: None for k in STAT_FIELDS}}
     arr = np.asarray(values, dtype=np.float64)
     q = np.percentile(arr, [5, 25, 50, 75, 95])
+    # q 索引: q[0]=P5, q[1]=P25, q[2]=P50(中位数), q[3]=P75, q[4]=P95
     return {
         "count": int(arr.size),
         "mean": float(arr.mean()),
-        "median": float(q[1]),
+        "median": float(q[2]),
         "p5": float(q[0]),
-        "p25": float(q[2]),
+        "p25": float(q[1]),
         "p75": float(q[3]),
         "p95": float(q[4]),
         "min": float(arr.min()),
